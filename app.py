@@ -2,21 +2,24 @@ import streamlit as st
 from groq import Groq
 from tavily import TavilyClient
 
-# 1. SETUP PAGE (Standard Mode - No hiding)
+# 1. PAGE SETUP
 st.set_page_config(page_title="Sunny's AI", page_icon="🤖")
 st.title("🤖 Sunny's AI")
 
-# 2. LOAD KEYS (We still need this for Cloud)
+# 2. LOAD KEYS (We use st.secrets for Cloud)
 try:
     GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
     TAVILY_API_KEY = st.secrets["TAVILY_API_KEY"]
-except:
-    st.error("❌ Secrets are missing. Please add them in Streamlit Settings.")
+except Exception:
+    st.error("🚨 Secrets are missing! Please add them in Streamlit Settings.")
     st.stop()
 
-# 3. INITIALIZE TOOLS
-groq_client = Groq(api_key=GROQ_API_KEY)
-tavily_client = TavilyClient(api_key=TAVILY_API_KEY)
+# 3. SETUP TOOLS
+try:
+    groq_client = Groq(api_key=GROQ_API_KEY)
+    tavily_client = TavilyClient(api_key=TAVILY_API_KEY)
+except Exception as e:
+    st.error(f"❌ Connection Error: {e}")
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
@@ -30,11 +33,11 @@ def search_web(query):
         for i, result in enumerate(results):
             context_text += f"SOURCE {i+1}: {result['title']} | URL: {result['url']} | CONTENT: {result['content']}\n\n"
         return context_text, results
-    except Exception as e:
-        return f"Error: {e}", []
+    except Exception:
+        return "", []
 
-# 5. AI FUNCTION
-def get_ai_answer(messages, search_context):
+# 5. AI FUNCTION (Streaming)
+def stream_ai_answer(messages, search_context):
     system_prompt = {
         "role": "system",
         "content": (
@@ -45,13 +48,15 @@ def get_ai_answer(messages, search_context):
     # Clean history for Groq
     clean_history = [{"role": m["role"], "content": m["content"]} for m in messages]
     
-    # Generate answer
-    completion = groq_client.chat.completions.create(
+    stream = groq_client.chat.completions.create(
         model="llama-3.1-8b-instant",
         messages=[system_prompt] + clean_history,
         temperature=0.7,
+        stream=True,
     )
-    return completion.choices[0].message.content
+    for chunk in stream:
+        if chunk.choices[0].delta.content:
+            yield chunk.choices[0].delta.content
 
 # 6. DRAW CHAT HISTORY
 for message in st.session_state.messages:
@@ -62,29 +67,28 @@ for message in st.session_state.messages:
                 for source in message["sources"]:
                     st.markdown(f"- [{source['title']}]({source['url']})")
 
-# 7. THE INPUT BAR (This must be at the bottom)
-if prompt := st.chat_input("Ask a question..."):
+# 7. INPUT BOX (Ensured to be visible)
+if prompt := st.chat_input("Ask me anything..."):
     
-    # Show User Message
+    # User message
     with st.chat_message("user"):
         st.markdown(prompt)
     st.session_state.messages.append({"role": "user", "content": prompt})
     
-    # Process Answer
+    # Assistant message
     with st.chat_message("assistant"):
-        with st.spinner("🔎 Searching & Thinking..."):
+        with st.spinner("🔎 Searching..."):
             search_context, sources = search_web(prompt)
-            answer = get_ai_answer(st.session_state.messages, search_context)
-            st.markdown(answer)
-            
-            if sources:
-                with st.expander("📚 Sources Used"):
-                    for source in sources:
-                        st.markdown(f"- [{source['title']}]({source['url']})")
+        
+        full_response = st.write_stream(stream_ai_answer(st.session_state.messages, search_context))
+        
+        if sources:
+            with st.expander("📚 Sources Used"):
+                for source in sources:
+                    st.markdown(f"- [{source['title']}]({source['url']})")
     
-    # Save History
     st.session_state.messages.append({
         "role": "assistant", 
-        "content": answer,
+        "content": full_response,
         "sources": sources
     })
