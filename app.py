@@ -117,3 +117,4 @@ if prompt := st.chat_input("What would you like to know?"):
                     st.markdown(f"- [{source['title']}]({source['url']})")
     
     st.session_state.messages.append({"role": "assistant", "content": full_response, "sources": sources})
+
