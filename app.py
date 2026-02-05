@@ -2,46 +2,14 @@ import streamlit as st
 from groq import Groq
 from tavily import TavilyClient
 
-# ==============================================================================
-# 🔐 SECRETS (These are loaded safely from Streamlit Cloud)
-# ==============================================================================
-# We use st.secrets so your keys are never exposed in the code
+# 1. LOAD KEYS
 GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
 TAVILY_API_KEY = st.secrets["TAVILY_API_KEY"]
 
-# ==============================================================================
-# 🎨 UI CONFIGURATION (Stealth Mode)
-# ==============================================================================
-st.set_page_config(
-    page_title="Sunny's AI",
-    page_icon="🤖",
-    layout="centered" # 'centered' looks more like a chat app on mobile
-)
+# 2. PAGE SETUP (Standard Mode)
+st.set_page_config(page_title="Sunny's AI", page_icon="🤖")
 
-# This CSS hides the "Made with Streamlit" footer and the top menu
-hide_streamlit_style = """
-<style>
-/* Hide the top right hamburger menu */
-#MainMenu {visibility: hidden;}
-
-/* Hide the "Made with Streamlit" footer */
-footer {visibility: hidden;}
-
-/* Hide the "Deploy" button */
-.stDeployButton {display:none;}
-
-/* Make the input box look cleaner */
-.stTextInput > div > div > input {
-    border-radius: 20px;
-}
-</style>
-"""
-st.markdown(hide_streamlit_style, unsafe_allow_html=True)
-
-# ==============================================================================
-# 🧠 APP LOGIC
-# ==============================================================================
-
+# 3. APP LOGIC
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
@@ -66,8 +34,7 @@ def stream_ai_answer(messages, search_context):
     system_prompt = {
         "role": "system",
         "content": (
-            "You are a helpful assistant. "
-            "Use the provided SEARCH RESULTS to answer the user's last question. "
+            "You are a helpful assistant. Answer based on the SEARCH RESULTS provided."
             f"\n\nSEARCH RESULTS:\n{search_context}"
         )
     }
@@ -83,14 +50,9 @@ def stream_ai_answer(messages, search_context):
         if chunk.choices[0].delta.content:
             yield chunk.choices[0].delta.content
 
-# ==============================================================================
-# 📱 MAIN INTERFACE
-# ==============================================================================
-
+# 4. MAIN INTERFACE
 st.title("🤖 Sunny's AI")
-st.caption("Private & Secure Personal Search")
 
-# Display Chat History
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
@@ -99,38 +61,24 @@ for message in st.session_state.messages:
                 for source in message["sources"]:
                     st.markdown(f"- [{source['title']}]({source['url']})")
 
-# Chat Input
+# --- THIS IS THE PART THAT WAS LIKELY MISSING ---
 if prompt := st.chat_input("Ask me anything..."):
     
-    # User Message
     with st.chat_message("user"):
         st.markdown(prompt)
     st.session_state.messages.append({"role": "user", "content": prompt})
     
-    # Assistant Message
     with st.chat_message("assistant"):
-        # Search Phase
-        status_text = st.empty() # Create an empty placeholder
-        status_text.caption("🔎 Searching the web...")
+        with st.spinner("🔎 Searching..."):
+            search_context, sources = search_web(prompt)
         
-        search_context, sources = search_web(prompt)
-        
-        # Thinking Phase
-        status_text.caption("🧠 Thinking...")
-        
-        # Streaming Answer
         full_response = st.write_stream(stream_ai_answer(st.session_state.messages, search_context))
         
-        # Clear the status text once done
-        status_text.empty()
-        
-        # Show Sources
         if sources:
             with st.expander("📚 Sources Used"):
                 for source in sources:
                     st.markdown(f"- [{source['title']}]({source['url']})")
     
-    # Save History
     st.session_state.messages.append({
         "role": "assistant", 
         "content": full_response,
