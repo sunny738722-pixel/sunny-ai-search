@@ -173,9 +173,30 @@ def execute_python_code(code, df):
         return f"❌ Code Error: {e}"
 
 def generate_audio(text):
+    """
+    Cleaner Audio Generation:
+    Removes Markdown (*, #, `), links, and underscores so the voice 
+    sounds natural and doesn't read special characters.
+    """
     try:
-        clean_text = text.replace("*", "").replace("#", "").replace("`", "")
+        # 1. Remove Markdown (*, #, `)
+        clean_text = re.sub(r'[\*#`]', '', text)
+        
+        # 2. Remove Web Links (http...)
+        clean_text = re.sub(r'http\S+', '', clean_text)
+        
+        # 3. Remove long lines (_______) and dashes
+        clean_text = re.sub(r'[-_]{2,}', ' ', clean_text)
+        
+        # 4. Remove single underscores (often read as "underscore")
+        clean_text = clean_text.replace("_", " ")
+        
+        # 5. Fix extra spaces
+        clean_text = " ".join(clean_text.split())
+
+        # Limit to 1000 chars for speed
         if len(clean_text) > 1000: clean_text = clean_text[:1000] + "..."
+        
         tts = gTTS(text=clean_text, lang='en')
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as fp:
             tts.save(fp.name)
@@ -183,25 +204,19 @@ def generate_audio(text):
     except: return None
 
 def generate_image(prompt):
-    """
-    Generates an image using Hugging Face (Pro Mode).
-    Updated to use the new 'router.huggingface.co' endpoint.
-    """
-    # --- UPDATED URL HERE ---
+    # Pro Mode (Hugging Face)
     API_URL = "https://router.huggingface.co/hf-inference/models/stabilityai/stable-diffusion-xl-base-1.0"
     headers = {"Authorization": f"Bearer {HF_TOKEN}"}
 
     try:
         response = requests.post(API_URL, headers=headers, json={"inputs": prompt})
         if response.status_code == 200:
-            return response.content # Success (Pro)
+            return response.content
         else:
-            # Fallback to Pollinations (Free)
-            st.warning(f"⚠️ Pro Mode Error: {response.status_code}. Switching to Free Mode...")
+            # Fallback to Pollinations
             clean_prompt = prompt.replace(" ", "%20")
             return f"https://image.pollinations.ai/prompt/{clean_prompt}"
     except:
-        # Fallback to Pollinations (Free)
         clean_prompt = prompt.replace(" ", "%20")
         return f"https://image.pollinations.ai/prompt/{clean_prompt}"
 
@@ -288,14 +303,11 @@ if final_prompt:
         df = active_chat["dataframe"]
         intent = classify_intent(final_prompt, has_data=(df is not None))
         
-        # st.toast(f"Intent: {intent}") # Uncomment to see debug intent
-        
         # --- IMAGE GENERATION ---
         if intent == "IMAGE":
             with st.spinner("🎨 Painting..."):
                 image_result = generate_image(final_prompt)
                 
-                # Check if it's Bytes (Pro) or String (Free URL)
                 if isinstance(image_result, bytes):
                     st.image(image_result, caption=final_prompt)
                     active_chat["messages"].append({
