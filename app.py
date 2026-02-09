@@ -139,14 +139,15 @@ def transcribe_audio(audio_bytes):
     except: return None
 
 def classify_intent(user_query, has_data=False):
-    # 1. Image Generation Check
-    if any(w in user_query.lower() for w in ["generate image", "create image", "draw", "paint", "imagine"]):
+    uq_lower = user_query.lower()
+    # 1. Image Generation Check (Made more robust)
+    if any(w in uq_lower for w in ["generate image", "create image", "image of", "draw a", "paint a"]):
         return "IMAGE"
     
     # 2. Data Check
     if has_data:
-        if any(w in user_query.lower() for w in ["plot", "chart", "graph"]): return "PLOT"
-        if any(w in user_query.lower() for w in ["analyze", "summary"]): return "ANALYZE"
+        if any(w in uq_lower for w in ["plot", "chart", "graph"]): return "PLOT"
+        if any(w in uq_lower for w in ["analyze", "summary"]): return "ANALYZE"
     
     # 3. General Check
     system_prompt = "Classify intent: 'SEARCH' (facts/news), 'CHAT' (casual). Return ONLY word."
@@ -179,7 +180,6 @@ def generate_audio(text):
 
 def generate_image(prompt):
     # We use Pollinations AI for free image generation
-    # We clean the prompt to be URL safe
     clean_prompt = prompt.replace(" ", "%20")
     return f"https://image.pollinations.ai/prompt/{clean_prompt}"
 
@@ -258,7 +258,7 @@ if final_prompt:
     active_chat["messages"].append({"role": "user", "content": final_prompt})
     
     if len(active_chat["messages"]) == 1:
-        st.session_state.all_chats[active_id]["title"] = " ".join(final_prompt.split()[:5]) + "..."
+        st.session_session.all_chats[active_id]["title"] = " ".join(final_prompt.split()[:5]) + "..."
 
     with st.chat_message("assistant"):
         df = active_chat["dataframe"]
