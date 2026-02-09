@@ -10,7 +10,7 @@ import re
 from gtts import gTTS
 import tempfile
 import os
-import requests # New library for Pro Image Generation
+import requests
 
 # ------------------------------------------------------------------
 # 1. PAGE CONFIGURATION
@@ -42,6 +42,7 @@ if "active_chat_id" not in st.session_state:
     st.session_state.active_chat_id = new_id
 
 active_id = st.session_state.active_chat_id
+# Safety check
 if active_id not in st.session_state.all_chats:
     st.session_state.all_chats[active_id] = {"title": "New Chat", "messages": [], "doc_text": "", "dataframe": None}
 active_chat = st.session_state.all_chats[active_id]
@@ -120,14 +121,14 @@ with st.sidebar:
             st.rerun()
 
 # ------------------------------------------------------------------
-# 4. API KEYS (NOW INCLUDING HUGGING FACE)
+# 4. API KEYS
 # ------------------------------------------------------------------
 try:
     groq_client = Groq(api_key=st.secrets["GROQ_API_KEY"])
     tavily_client = TavilyClient(api_key=st.secrets["TAVILY_API_KEY"])
-    HF_TOKEN = st.secrets["HF_TOKEN"] # Pro Image Key
+    HF_TOKEN = st.secrets["HF_TOKEN"]
 except Exception:
-    st.error("🚨 API Keys missing! Check Streamlit Settings (GROQ, TAVILY, or HF_TOKEN).")
+    st.error("🚨 API Keys missing! Check Streamlit Settings.")
     st.stop()
 
 # ------------------------------------------------------------------
@@ -183,26 +184,24 @@ def generate_audio(text):
 
 def generate_image(prompt):
     """
-    Tries Pro Mode (Hugging Face). If it fails, switches to Free Mode (Pollinations).
+    Generates an image using Hugging Face (Pro Mode).
+    Updated to use the new 'router.huggingface.co' endpoint.
     """
-    # 1. PRO MODE (Hugging Face)
-    # We use a reliable model (v1-5) that usually doesn't require special permissions
-    API_URL = "https://api-inference.huggingface.co/models/runwayml/stable-diffusion-v1-5"
+    # --- UPDATED URL HERE ---
+    API_URL = "https://router.huggingface.co/hf-inference/models/stabilityai/stable-diffusion-xl-base-1.0"
     headers = {"Authorization": f"Bearer {HF_TOKEN}"}
 
     try:
         response = requests.post(API_URL, headers=headers, json={"inputs": prompt})
-        
         if response.status_code == 200:
-            return response.content # Success! Return image bytes
+            return response.content # Success (Pro)
         else:
-            # If HF fails, print why (for debugging) but don't crash
-            st.warning(f"⚠️ Pro Mode Error: {response.status_code} - {response.text}")
-            st.info("🔄 Switching to Free Mode...")
-            raise Exception("HF Failed") # Trigger the fallback
-            
-    except Exception as e:
-        # 2. FREE MODE (Pollinations Fallback)
+            # Fallback to Pollinations (Free)
+            st.warning(f"⚠️ Pro Mode Error: {response.status_code}. Switching to Free Mode...")
+            clean_prompt = prompt.replace(" ", "%20")
+            return f"https://image.pollinations.ai/prompt/{clean_prompt}"
+    except:
+        # Fallback to Pollinations (Free)
         clean_prompt = prompt.replace(" ", "%20")
         return f"https://image.pollinations.ai/prompt/{clean_prompt}"
 
@@ -251,9 +250,11 @@ for i, message in enumerate(active_chat["messages"]):
             with st.expander("📊 Analysis Output"):
                 execute_python_code(message["code_ran"], active_chat["dataframe"])
         
-        # Show Images (Bytes Logic Updated)
+        # Show Images
         if "image_bytes" in message:
             st.image(message["image_bytes"], caption="Generated Art")
+        if "image_url" in message:
+            st.image(message["image_url"], caption="Generated Art")
         
         # Show Audio
         if "audio_file" in message:
@@ -287,9 +288,9 @@ if final_prompt:
         df = active_chat["dataframe"]
         intent = classify_intent(final_prompt, has_data=(df is not None))
         
-        st.toast(f"Intent: {intent}")
+        # st.toast(f"Intent: {intent}") # Uncomment to see debug intent
         
-# --- IMAGE GENERATION (SMART MODE) ---
+        # --- IMAGE GENERATION ---
         if intent == "IMAGE":
             with st.spinner("🎨 Painting..."):
                 image_result = generate_image(final_prompt)
@@ -347,4 +348,3 @@ if final_prompt:
             
             if len(active_chat["messages"]) == 2:
                 st.rerun()
-
