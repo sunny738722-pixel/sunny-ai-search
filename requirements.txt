@@ -1,4 +1,6 @@
 streamlit
 groq
 tavily-python
+
 duckduckgo-search
+PyPDF2
