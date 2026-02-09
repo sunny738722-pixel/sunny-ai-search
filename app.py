@@ -183,20 +183,28 @@ def generate_audio(text):
 
 def generate_image(prompt):
     """
-    Generates an image using Hugging Face's Stable Diffusion XL model.
-    This is PRO tier (API Key based) so it won't hit anonymous rate limits.
+    Tries Pro Mode (Hugging Face). If it fails, switches to Free Mode (Pollinations).
     """
-    API_URL = "https://api-inference.huggingface.co/models/stabilityai/stable-diffusion-xl-base-1.0"
+    # 1. PRO MODE (Hugging Face)
+    # We use a reliable model (v1-5) that usually doesn't require special permissions
+    API_URL = "https://api-inference.huggingface.co/models/runwayml/stable-diffusion-v1-5"
     headers = {"Authorization": f"Bearer {HF_TOKEN}"}
-    
+
     try:
         response = requests.post(API_URL, headers=headers, json={"inputs": prompt})
+        
         if response.status_code == 200:
-            return response.content # Returns raw image bytes
+            return response.content # Success! Return image bytes
         else:
-            return None
-    except:
-        return None
+            # If HF fails, print why (for debugging) but don't crash
+            st.warning(f"⚠️ Pro Mode Error: {response.status_code} - {response.text}")
+            st.info("🔄 Switching to Free Mode...")
+            raise Exception("HF Failed") # Trigger the fallback
+            
+    except Exception as e:
+        # 2. FREE MODE (Pollinations Fallback)
+        clean_prompt = prompt.replace(" ", "%20")
+        return f"https://image.pollinations.ai/prompt/{clean_prompt}"
 
 def stream_ai_answer(messages, search_results, doc_text, df):
     context = ""
@@ -281,22 +289,26 @@ if final_prompt:
         
         st.toast(f"Intent: {intent}")
         
-        # --- IMAGE GENERATION (PRO MODE) ---
+# --- IMAGE GENERATION (SMART MODE) ---
         if intent == "IMAGE":
-            with st.spinner("🎨 Generating Art (HD)..."):
-                image_bytes = generate_image(final_prompt)
+            with st.spinner("🎨 Painting..."):
+                image_result = generate_image(final_prompt)
                 
-                if image_bytes:
-                    st.image(image_bytes, caption=final_prompt)
-                    full_response = f"Here is the generated image for: {final_prompt}"
-                    
+                # Check if it's Bytes (Pro) or String (Free URL)
+                if isinstance(image_result, bytes):
+                    st.image(image_result, caption=final_prompt)
                     active_chat["messages"].append({
                         "role": "assistant", 
-                        "content": full_response, 
-                        "image_bytes": image_bytes # Save bytes, not URL
+                        "content": f"Here is your image: {final_prompt}", 
+                        "image_bytes": image_result
                     })
                 else:
-                    st.error("❌ Failed to generate image. Check HF_TOKEN.")
+                    st.image(image_result, caption=final_prompt)
+                    active_chat["messages"].append({
+                        "role": "assistant", 
+                        "content": f"Here is your image: {final_prompt}", 
+                        "image_url": image_result
+                    })
         
         # --- STANDARD PATH ---
         else:
@@ -335,3 +347,4 @@ if final_prompt:
             
             if len(active_chat["messages"]) == 2:
                 st.rerun()
+
