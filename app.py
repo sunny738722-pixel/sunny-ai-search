@@ -95,8 +95,17 @@ with st.sidebar:
     st.divider()
     
     # SETTINGS
+    st.markdown("### ⚙️ Settings")
     deep_mode = st.toggle("🚀 Deep Research", value=False)
     enable_voice = st.toggle("🔊 Hear AI Response", value=False)
+    
+    # --- NEW: FLEXIBLE MODEL SELECTOR ---
+    # This allows you to fix the model name instantly if Groq changes it again.
+    vision_model_name = st.text_input(
+        "Vision Model Name:", 
+        value="llama-3.2-90b-vision-preview", 
+        help="If error 400 occurs, check console.groq.com/docs/models and paste the new name here."
+    )
     
     # EXPORT
     if st.button("📥 Download Chat PDF"):
@@ -202,7 +211,7 @@ def generate_image(prompt):
         clean_prompt = prompt.replace(" ", "%20")
         return f"https://image.pollinations.ai/prompt/{clean_prompt}"
 
-def stream_ai_answer(messages, search_results, doc_text, df, image_data):
+def stream_ai_answer(messages, search_results, doc_text, df, image_data, vision_model_name):
     context_text = ""
     if search_results:
         context_text += "\nWEB SOURCES:\n" + "\n".join([f"- {r['title']}: {r['content']}" for r in search_results])
@@ -212,14 +221,11 @@ def stream_ai_answer(messages, search_results, doc_text, df, image_data):
         context_text += f"\n\nDATAFRAME PREVIEW:\n{df.head().to_markdown()}"
         context_text += "\n\nINSTRUCTIONS: If asked to visualize/plot, write Python code wrapped in ```python ... ```."
 
-    # --- UPDATED VISION MODEL NAME HERE ---
+    # --- USE THE MODEL NAME FROM SETTINGS ---
     if image_data:
-        model = "llama-3.2-11b-vision-preview" # Replaced 90b with 11b
-        
+        model = vision_model_name # <--- Uses the text box value
         system_content = f"You are a helpful AI Assistant. Analyze the image provided. Use this context if available: {context_text}"
         
-        # Structure for Vision Model
-        # We construct a simpler message for the vision model to ensure compatibility
         user_content = [
             {"type": "text", "text": messages[-1]["content"]},
             {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_data}"}}
@@ -317,7 +323,7 @@ if final_prompt:
                     search_results = search_web(final_prompt, deep_mode)
             
             full_response = st.write_stream(
-                stream_ai_answer(active_chat["messages"], search_results, active_chat["doc_text"], df, img_data)
+                stream_ai_answer(active_chat["messages"], search_results, active_chat["doc_text"], df, img_data, vision_model_name)
             )
             
             # Code Execution
