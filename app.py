@@ -37,13 +37,12 @@ if "active_chat_id" not in st.session_state:
         "title": "New Chat", 
         "messages": [], 
         "doc_text": "", 
-        "dataframe": None,
-        "image_data": None # New: Store image base64
+        "dataframe": None, 
+        "image_data": None
     }
     st.session_state.active_chat_id = new_id
 
 active_id = st.session_state.active_chat_id
-# Safety check
 if active_id not in st.session_state.all_chats:
     st.session_state.all_chats[active_id] = {"title": "New Chat", "messages": [], "doc_text": "", "dataframe": None, "image_data": None}
 active_chat = st.session_state.all_chats[active_id]
@@ -64,6 +63,7 @@ with st.sidebar:
             else:
                 df = pd.read_excel(uploaded_csv)
             st.session_state.all_chats[active_id]["dataframe"] = df
+            st.session_state.all_chats[active_id]["file_name"] = uploaded_csv.name
             st.success(f"✅ Loaded Data: {uploaded_csv.name} ({len(df)} rows)")
         except Exception as e:
             st.error(f"Error reading data: {e}")
@@ -82,11 +82,10 @@ with st.sidebar:
         except Exception as e:
             st.error(f"Error reading PDF: {e}")
 
-    # C. VISION (NEW) 👁️
+    # C. VISION EYE
     st.markdown("### 👁️ Vision Eye")
     uploaded_img = st.file_uploader("Upload Image:", type=["jpg", "jpeg", "png"])
     if uploaded_img:
-        # Convert to Base64 immediately
         bytes_data = uploaded_img.getvalue()
         base64_image = base64.b64encode(bytes_data).decode('utf-8')
         st.session_state.all_chats[active_id]["image_data"] = base64_image
@@ -178,9 +177,9 @@ def execute_python_code(code, df):
 
 def generate_audio(text):
     try:
-        clean_text = re.sub(r'[\*#`]', '', text) # Remove Markdown
-        clean_text = re.sub(r'http\S+', '', clean_text) # Remove Links
-        clean_text = re.sub(r'[-_]{2,}', ' ', clean_text) # Remove separators
+        clean_text = re.sub(r'[\*#`]', '', text) 
+        clean_text = re.sub(r'http\S+', '', clean_text)
+        clean_text = re.sub(r'[-_]{2,}', ' ', clean_text)
         clean_text = clean_text.replace("_", " ")
         clean_text = " ".join(clean_text.split())
         if len(clean_text) > 1000: clean_text = clean_text[:1000] + "..."
@@ -204,7 +203,6 @@ def generate_image(prompt):
         return f"https://image.pollinations.ai/prompt/{clean_prompt}"
 
 def stream_ai_answer(messages, search_results, doc_text, df, image_data):
-    # 1. Context Building
     context_text = ""
     if search_results:
         context_text += "\nWEB SOURCES:\n" + "\n".join([f"- {r['title']}: {r['content']}" for r in search_results])
@@ -214,23 +212,22 @@ def stream_ai_answer(messages, search_results, doc_text, df, image_data):
         context_text += f"\n\nDATAFRAME PREVIEW:\n{df.head().to_markdown()}"
         context_text += "\n\nINSTRUCTIONS: If asked to visualize/plot, write Python code wrapped in ```python ... ```."
 
-    # 2. Model Selection Logic
-    # If we have an image, we MUST use the Vision model (Llama 3.2 90b Vision)
+    # --- UPDATED VISION MODEL NAME HERE ---
     if image_data:
-        model = "llama-3.2-90b-vision-preview" 
+        model = "llama-3.2-11b-vision-preview" # Replaced 90b with 11b
+        
         system_content = f"You are a helpful AI Assistant. Analyze the image provided. Use this context if available: {context_text}"
         
         # Structure for Vision Model
-        user_message_content = [
+        # We construct a simpler message for the vision model to ensure compatibility
+        user_content = [
             {"type": "text", "text": messages[-1]["content"]},
             {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_data}"}}
         ]
         
-        # We need to construct a fresh history for the vision model call to avoid format conflicts
-        # For simplicity in this version, we send the System Prompt + The Current User Question with Image
         final_messages = [
             {"role": "system", "content": system_content},
-            {"role": "user", "content": user_message_content}
+            {"role": "user", "content": user_content}
         ]
     
     else:
@@ -298,7 +295,7 @@ if final_prompt:
 
     with st.chat_message("assistant"):
         df = active_chat["dataframe"]
-        img_data = active_chat.get("image_data") # Get uploaded image
+        img_data = active_chat.get("image_data")
         intent = classify_intent(final_prompt, has_data=(df is not None))
         
         # --- IMAGE GENERATION ---
@@ -315,12 +312,10 @@ if final_prompt:
         # --- STANDARD / VISION PATH ---
         else:
             search_results = []
-            # Only search if we don't have Docs or Image context (Vision usually answers from the image)
             if (intent == "SEARCH" or deep_mode) and not df and not active_chat["doc_text"] and not img_data:
                 with st.spinner("Searching..."):
                     search_results = search_web(final_prompt, deep_mode)
             
-            # Send everything (Docs + Web + PDF + Image) to the AI
             full_response = st.write_stream(
                 stream_ai_answer(active_chat["messages"], search_results, active_chat["doc_text"], df, img_data)
             )
