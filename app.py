@@ -3,7 +3,7 @@ from groq import Groq
 from tavily import TavilyClient
 import uuid
 
-# 1. PAGE SETUP
+# 1. PAGE CONFIGURATION
 st.set_page_config(page_title="Sunny's AI", page_icon="🤖", layout="wide")
 
 # 2. SESSION STATE (Memory)
@@ -18,6 +18,7 @@ if "active_chat_id" not in st.session_state:
 with st.sidebar:
     st.title("💬 Your Chats")
     
+    # New Chat Button
     if st.button("➕ New Chat", use_container_width=True, type="primary"):
         new_id = str(uuid.uuid4())
         st.session_state.all_chats[new_id] = {"title": "New Chat", "messages": []}
@@ -27,20 +28,21 @@ with st.sidebar:
     st.divider()
     
     # List all chats
+    # We use reversed() so the newest chat is at the top
     for chat_id in reversed(list(st.session_state.all_chats.keys())):
         chat = st.session_state.all_chats[chat_id]
         
-        # Define columns for the Title button and Delete button
         col1, col2 = st.columns([0.85, 0.15]) 
         
         with col1:
-            # Check if this is the active chat to highlight it
+            # Highlight active chat
             is_active = (chat_id == st.session_state.active_chat_id)
             if st.button(f"📝 {chat['title']}", key=f"btn_{chat_id}", use_container_width=True, type="primary" if is_active else "secondary"):
                 st.session_state.active_chat_id = chat_id
                 st.rerun()
                 
         with col2:
+            # Delete button
             if st.button("❌", key=f"del_{chat_id}"):
                 del st.session_state.all_chats[chat_id]
                 # If deleted active chat, create new one
@@ -52,7 +54,6 @@ with st.sidebar:
 
     st.divider()
     
-    # Model Selector
     st.header("⚙️ Settings")
     selected_model = st.selectbox(
         "AI Model:",
@@ -70,11 +71,20 @@ except Exception:
 
 # 5. LOGIC FUNCTIONS
 def search_web(query):
+    # --- THIS WAS THE FIX ---
+    # We must return TWO things: (context_text, results)
     try:
         response = tavily_client.search(query, max_results=3)
-        return response.get("results", [])
+        results = response.get("results", [])
+        
+        # Create the text blob for the AI to read
+        context_text = ""
+        for i, result in enumerate(results):
+            context_text += f"SOURCE {i+1}: {result['title']} | URL: {result['url']} | CONTENT: {result['content']}\n\n"
+            
+        return context_text, results # <--- Returning 2 items now!
     except:
-        return []
+        return "", []
 
 def stream_ai_answer(messages, search_context, model_name):
     system_prompt = {
@@ -84,7 +94,6 @@ def stream_ai_answer(messages, search_context, model_name):
             f"\n\nSEARCH RESULTS:\n{search_context}"
         )
     }
-    # Clean history for Groq
     clean_history = [{"role": m["role"], "content": m["content"]} for m in messages]
     
     try:
@@ -101,6 +110,12 @@ def stream_ai_answer(messages, search_context, model_name):
         yield f"❌ Error: {e}"
 
 # 6. MAIN CHAT UI
+# Safety check: Ensure active_chat_id exists (in case of weird delete errors)
+if st.session_state.active_chat_id not in st.session_state.all_chats:
+    new_id = str(uuid.uuid4())
+    st.session_state.all_chats[new_id] = {"title": "New Chat", "messages": []}
+    st.session_state.active_chat_id = new_id
+
 active_id = st.session_state.active_chat_id
 active_chat = st.session_state.all_chats[active_id]
 
@@ -123,15 +138,15 @@ if prompt := st.chat_input("Ask me anything..."):
         st.markdown(prompt)
     st.session_state.all_chats[active_id]["messages"].append({"role": "user", "content": prompt})
     
-    # 2. Rename Chat (Silently - No Rerun!)
+    # 2. Rename Chat (Silently)
     if len(active_chat["messages"]) == 1:
-        # We define the title but DO NOT refresh the page yet
         new_title = " ".join(prompt.split()[:4]) + "..."
         st.session_state.all_chats[active_id]["title"] = new_title
     
     # 3. Generate Answer
     with st.chat_message("assistant"):
         with st.spinner("🔎 Searching..."):
+            # Now this line works because search_web returns 2 items!
             search_context, sources = search_web(prompt)
         
         full_response = st.write_stream(
@@ -150,6 +165,6 @@ if prompt := st.chat_input("Ask me anything..."):
         "sources": sources
     })
     
-    # 5. Force Rerun ONLY if we renamed the chat (so the sidebar updates at the VERY END)
+    # 5. Refresh Sidebar (Only on first message)
     if len(active_chat["messages"]) == 2:
         st.rerun()
