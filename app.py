@@ -8,135 +8,145 @@ from tavily import TavilyClient
 st.set_page_config(
     page_title="Sunny's AI",
     page_icon="🤖",
-    layout="wide"  # "Wide" layout uses more screen space
+    layout="centered" # Changed to centered for a cleaner "Chat" look
 )
 
+# Custom CSS to make it look cleaner
+st.markdown("""
+<style>
+    .st-emotion-cache-1y4p8pa {padding-top: 2rem;} /* Less whitespace at top */
+    .stChatInput {position: fixed; bottom: 30px;} /* Fix input to bottom */
+</style>
+""", unsafe_allow_html=True)
+
 # ------------------------------------------------------------------
-# 2. SIDEBAR (The Control Panel)
+# 2. SIDEBAR
 # ------------------------------------------------------------------
 with st.sidebar:
-    st.title("⚙️ Settings")
+    st.header("⚙️ Settings")
     
-    # Feature 1: Model Selector
-    st.markdown("### Choose your Brain")
+    # Model Selector
     selected_model = st.selectbox(
-        "Model:",
-        options=["llama-3.1-8b-instant", "llama-3.3-70b-versatile", "mixtral-8x7b-32768"],
-        index=0, # Default to the fast one
-        help="70b is smarter but slower. 8b is fastest."
+        "AI Model:",
+        options=["llama-3.1-8b-instant", "llama-3.3-70b-versatile"],
+        index=0,
+        format_func=lambda x: "Fast (8b)" if "8b" in x else "Smart (70b)"
     )
     
-    st.markdown("---")
+    st.divider()
     
-    # Feature 2: Clear History Button
-    if st.button("🧹 Clear Chat History", type="primary"):
+    # Clear Button
+    if st.button("🗑️ Reset Conversation", use_container_width=True):
         st.session_state.messages = []
-        st.rerun() # Refreshes the app instantly
+        st.rerun()
 
-    st.markdown("---")
-    st.caption("Powered by Groq & Tavily")
+    st.divider()
+    st.markdown("### ℹ️ About")
+    st.caption("A private AI search engine powered by Groq & Tavily.\n\nBuilt by Sunny.")
 
 # ------------------------------------------------------------------
-# 3. LOAD API KEYS (Safety First)
+# 3. SETUP & KEYS
 # ------------------------------------------------------------------
 try:
-    GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
-    TAVILY_API_KEY = st.secrets["TAVILY_API_KEY"]
+    groq_client = Groq(api_key=st.secrets["GROQ_API_KEY"])
+    tavily_client = TavilyClient(api_key=st.secrets["TAVILY_API_KEY"])
 except Exception:
-    st.error("🚨 Secrets are missing! Please add them in Streamlit Settings.")
+    st.error("🚨 API Keys missing! Check Streamlit Settings.")
     st.stop()
 
-# Initialize Tools
-try:
-    groq_client = Groq(api_key=GROQ_API_KEY)
-    tavily_client = TavilyClient(api_key=TAVILY_API_KEY)
-except Exception as e:
-    st.error(f"❌ Connection Error: {e}")
-    st.stop()
-
-# ------------------------------------------------------------------
-# 4. CORE LOGIC (Search & Think)
-# ------------------------------------------------------------------
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
+# ------------------------------------------------------------------
+# 4. LOGIC
+# ------------------------------------------------------------------
 def search_web(query):
-    """Searches the web and returns neat results"""
     try:
-        response = tavily_client.search(query, max_results=3)
-        results = response.get("results", [])
-        context_text = ""
-        for i, result in enumerate(results):
-            context_text += f"SOURCE {i+1}: {result['title']} | URL: {result['url']} | CONTENT: {result['content']}\n\n"
-        return context_text, results
-    except Exception:
-        return "", []
+        response = tavily_client.search(query, max_results=5) # Increased to 5 sources
+        return response.get("results", [])
+    except:
+        return []
 
-def stream_ai_answer(messages, search_context, model_name):
-    """Streams the answer using the SELECTED model"""
+def stream_ai_answer(messages, search_results, model_name):
+    # Format sources for the AI
+    context = "\n".join([
+        f"Source {i+1}: {r['title']} ({r['url']})\nSummary: {r['content']}" 
+        for i, r in enumerate(search_results)
+    ])
+    
     system_prompt = {
         "role": "system",
         "content": (
-            "You are a helpful assistant. Answer based on the SEARCH RESULTS provided."
-            "Always cite your sources."
-            f"\n\nSEARCH RESULTS:\n{search_context}"
+            "You are a helpful research assistant. "
+            "Answer the user's question based ONLY on the provided Search Results. "
+            "Cite sources using [1], [2], etc. "
+            f"\n\nSEARCH RESULTS:\n{context}"
         )
     }
     
-    # Clean history for Groq
     clean_history = [{"role": m["role"], "content": m["content"]} for m in messages]
     
-    try:
-        stream = groq_client.chat.completions.create(
-            model=model_name,  # <--- We use the variable here!
-            messages=[system_prompt] + clean_history,
-            temperature=0.7,
-            stream=True,
-        )
-        for chunk in stream:
-            if chunk.choices[0].delta.content:
-                yield chunk.choices[0].delta.content
-    except Exception as e:
-        yield f"❌ Error: {e}"
+    stream = groq_client.chat.completions.create(
+        model=model_name,
+        messages=[system_prompt] + clean_history,
+        temperature=0.7,
+        stream=True,
+    )
+    for chunk in stream:
+        if chunk.choices[0].delta.content:
+            yield chunk.choices[0].delta.content
 
 # ------------------------------------------------------------------
-# 5. MAIN INTERFACE
+# 5. UI: DRAW CHAT
 # ------------------------------------------------------------------
 st.title("🤖 Sunny's AI")
-st.caption(f"Running on: {selected_model}") # Shows which brain is active
 
-# Draw History
-for message in st.session_state.messages:
-    with st.chat_message(message["role"]):
-        st.markdown(message["content"])
-        if "sources" in message:
-            with st.expander("📚 Sources"):
-                for source in message["sources"]:
-                    st.markdown(f"- [{source['title']}]({source['url']})")
+for msg in st.session_state.messages:
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
+        
+        # If this message has source data attached, show it
+        if "results" in msg and msg["results"]:
+            with st.expander(f"📚 {len(msg['results'])} Sources Cited"):
+                for r in msg["results"]:
+                    st.markdown(f"**[{r['title']}]({r['url']})**")
+                    st.caption(r['content'][:150] + "...")
 
-# Input Box
-if prompt := st.chat_input("Ask me anything..."):
+# ------------------------------------------------------------------
+# 6. UI: HANDLE INPUT
+# ------------------------------------------------------------------
+if prompt := st.chat_input("What do you want to know?"):
     
-    # User message
+    # 1. Show User Message
+    st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
-    st.session_state.messages.append({"role": "user", "content": prompt})
     
-    # Assistant message
+    # 2. Process
     with st.chat_message("assistant"):
-        with st.spinner("🔎 Searching..."):
-            search_context, sources = search_web(prompt)
         
-        # We pass the 'selected_model' from the sidebar to the function
-        full_response = st.write_stream(stream_ai_answer(st.session_state.messages, search_context, selected_model))
+        # A. Search Phase
+        status = st.status("🔎 Searching the web...", expanded=True)
+        results = search_web(prompt)
         
-        if sources:
-            with st.expander("📚 Sources Used"):
-                for source in sources:
-                    st.markdown(f"- [{source['title']}]({source['url']})")
-    
+        if results:
+            status.write("✅ Found relevant information")
+            status.update(label="📚 Knowledge Gathered", state="complete", expanded=False)
+        else:
+            status.update(label="❌ No results found", state="error")
+            
+        # B. Answer Phase
+        full_response = st.write_stream(stream_ai_answer(st.session_state.messages, results, selected_model))
+        
+        # C. Append Sources (Cleanly)
+        if results:
+            with st.expander(f"📚 Sources ({len(results)})"):
+                for r in results:
+                    st.markdown(f"- [{r['title']}]({r['url']})")
+
+    # 3. Save to History
     st.session_state.messages.append({
         "role": "assistant", 
         "content": full_response,
-        "sources": sources
+        "results": results # Save sources so they persist!
     })
