@@ -131,10 +131,11 @@ def transcribe_audio(audio_bytes):
     try:
         return groq_client.audio.transcriptions.create(
             file=("voice.wav", audio_bytes),
-            model="distil-whisper-large-v3-en",
+            model="whisper-large-v3", # Switched to the more stable model
             response_format="text"
         )
     except Exception as e:
+        st.error(f"❌ Audio Error: {e}") # This will show you the error on screen!
         return None
 
 def generate_sub_queries(user_query):
@@ -277,3 +278,4 @@ if final_prompt:
     
     if len(active_chat["messages"]) == 2:
         st.rerun()
+
