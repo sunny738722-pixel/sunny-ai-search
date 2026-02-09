@@ -85,8 +85,7 @@ with st.sidebar:
     
     # SETTINGS
     deep_mode = st.toggle("🚀 Deep Research", value=False)
-    # --- NEW FEATURE: VOICE TOGGLE ---
-    enable_voice = st.toggle("🔊 Hear AI Response", value=False, help="Enable Text-to-Speech")
+    enable_voice = st.toggle("🔊 Hear AI Response", value=False)
     
     # EXPORT
     if st.button("📥 Download Chat PDF"):
@@ -140,9 +139,16 @@ def transcribe_audio(audio_bytes):
     except: return None
 
 def classify_intent(user_query, has_data=False):
+    # 1. Image Generation Check
+    if any(w in user_query.lower() for w in ["generate image", "create image", "draw", "paint", "imagine"]):
+        return "IMAGE"
+    
+    # 2. Data Check
     if has_data:
         if any(w in user_query.lower() for w in ["plot", "chart", "graph"]): return "PLOT"
         if any(w in user_query.lower() for w in ["analyze", "summary"]): return "ANALYZE"
+    
+    # 3. General Check
     system_prompt = "Classify intent: 'SEARCH' (facts/news), 'CHAT' (casual). Return ONLY word."
     try:
         resp = groq_client.chat.completions.create(model="llama-3.1-8b-instant", messages=[{"role":"system","content":system_prompt},{"role":"user","content":user_query}], max_tokens=10)
@@ -162,20 +168,20 @@ def execute_python_code(code, df):
         return f"❌ Code Error: {e}"
 
 def generate_audio(text):
-    """Generates an MP3 file from text using gTTS"""
     try:
-        # Clean text slightly (remove large markdown chunks for better speech)
         clean_text = text.replace("*", "").replace("#", "").replace("`", "")
-        # Limit length to avoid long waits
-        if len(clean_text) > 1000:
-            clean_text = clean_text[:1000] + "... (speech truncated)"
-            
+        if len(clean_text) > 1000: clean_text = clean_text[:1000] + "..."
         tts = gTTS(text=clean_text, lang='en')
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as fp:
             tts.save(fp.name)
             return fp.name
-    except Exception as e:
-        return None
+    except: return None
+
+def generate_image(prompt):
+    # We use Pollinations AI for free image generation
+    # We clean the prompt to be URL safe
+    clean_prompt = prompt.replace(" ", "%20")
+    return f"https://image.pollinations.ai/prompt/{clean_prompt}"
 
 def stream_ai_answer(messages, search_results, doc_text, df):
     context = ""
@@ -185,7 +191,7 @@ def stream_ai_answer(messages, search_results, doc_text, df):
         context += f"\n\nDOCUMENT CONTEXT:\n{doc_text[:20000]}..."
     if df is not None:
         context += f"\n\nDATAFRAME PREVIEW:\n{df.head().to_markdown()}"
-        context += "\n\nINSTRUCTIONS: If asked to visualize/plot, write Python code wrapped in ```python ... ```. Use st.bar_chart(df) etc."
+        context += "\n\nINSTRUCTIONS: If asked to visualize/plot, write Python code wrapped in ```python ... ```."
 
     system_prompt = {
         "role": "system", 
@@ -216,13 +222,23 @@ st.title(f"{active_chat['title']}")
 for i, message in enumerate(active_chat["messages"]):
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
+        
+        # Show Charts
         if "code_ran" in message and active_chat["dataframe"] is not None:
             with st.expander("📊 Analysis Output"):
                 execute_python_code(message["code_ran"], active_chat["dataframe"])
+        
+        # Show Images
+        if "image_url" in message:
+            st.image(message["image_url"], caption="Generated Image")
+        
+        # Show Audio
+        if "audio_file" in message:
+             st.audio(message["audio_file"], format="audio/mp3")
 
 # Input
 audio_value = st.audio_input("🎙️")
-prompt = st.chat_input("Ask anything...")
+prompt = st.chat_input("Ask anything or say 'Generate image of...'")
 final_prompt = None
 
 if audio_value:
@@ -248,37 +264,56 @@ if final_prompt:
         df = active_chat["dataframe"]
         intent = classify_intent(final_prompt, has_data=(df is not None))
         
-        search_results = []
-        if intent == "SEARCH" or (deep_mode and not df and not active_chat["doc_text"]):
-            with st.spinner("Searching..."):
-                search_results = search_web(final_prompt, deep_mode)
+        # --- IMAGE GENERATION PATH ---
+        if intent == "IMAGE":
+            with st.spinner("🎨 Painting your imagination..."):
+                image_url = generate_image(final_prompt)
+                st.image(image_url, caption=final_prompt)
+                full_response = f"Here is the image for: {final_prompt}"
+                
+                # Save to history
+                active_chat["messages"].append({
+                    "role": "assistant", 
+                    "content": full_response, 
+                    "image_url": image_url
+                })
+                # No rerun needed here, we just showed it.
         
-        # Stream Response
-        full_response = st.write_stream(
-            stream_ai_answer(active_chat["messages"], search_results, active_chat["doc_text"], df)
-        )
-        
-        # --- CODE EXECUTION ---
-        code_block = None
-        if df is not None:
-            match = re.search(r"```python(.*?)```", full_response, re.DOTALL)
-            if match:
-                code_block = match.group(1).strip()
-                st.markdown("### 📊 Generating Chart...")
-                result = execute_python_code(code_block, df)
-                if "Error" in result: st.error(result)
-        
-        # --- VOICE GENERATION (NEW) ---
-        if enable_voice:
-            with st.spinner("Generating audio..."):
-                audio_file = generate_audio(full_response)
-                if audio_file:
-                    st.audio(audio_file, format="audio/mp3")
+        # --- STANDARD PATH ---
+        else:
+            search_results = []
+            if intent == "SEARCH" or (deep_mode and not df and not active_chat["doc_text"]):
+                with st.spinner("Searching..."):
+                    search_results = search_web(final_prompt, deep_mode)
+            
+            full_response = st.write_stream(
+                stream_ai_answer(active_chat["messages"], search_results, active_chat["doc_text"], df)
+            )
+            
+            # Code Execution
+            code_block = None
+            if df is not None:
+                match = re.search(r"```python(.*?)```", full_response, re.DOTALL)
+                if match:
+                    code_block = match.group(1).strip()
+                    st.markdown("### 📊 Generating Chart...")
+                    result = execute_python_code(code_block, df)
+                    if "Error" in result: st.error(result)
+            
+            # Voice Generation
+            audio_file = None
+            if enable_voice:
+                with st.spinner("Generating audio..."):
+                    audio_file = generate_audio(full_response)
+                    if audio_file:
+                        st.audio(audio_file, format="audio/mp3")
 
-    msg_data = {"role": "assistant", "content": full_response, "sources": search_results}
-    if code_block:
-        msg_data["code_ran"] = code_block
-    active_chat["messages"].append(msg_data)
-    
-    if len(active_chat["messages"]) == 2:
-        st.rerun()
+            # Save Message
+            msg_data = {"role": "assistant", "content": full_response, "sources": search_results}
+            if code_block: msg_data["code_ran"] = code_block
+            if audio_file: msg_data["audio_file"] = audio_file
+            
+            active_chat["messages"].append(msg_data)
+            
+            if len(active_chat["messages"]) == 2:
+                st.rerun()
