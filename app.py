@@ -99,11 +99,17 @@ with st.sidebar:
     deep_mode = st.toggle("🚀 Deep Research", value=False)
     enable_voice = st.toggle("🔊 Hear AI Response", value=False)
     
-    # --- UPDATED DEFAULT MODEL ---
-    vision_model_name = st.text_input(
-        "Vision Model Name:", 
-        value="llama-3.2-11b-vision-preview", # CHANGED to the working 11b model
-        help="If error 400 occurs, check console.groq.com/docs/models and paste the new name here."
+    # --- UPDATED: DROPDOWN SELECTOR ---
+    # We use a selectbox so you can easily swap models if one dies
+    vision_model_name = st.selectbox(
+        "Select Vision Model:", 
+        [
+            "llama-3.2-11b-vision-preview",
+            "llama-3.2-90b-vision-preview",
+            "llama-3.2-11b-vision" 
+        ],
+        index=0, # Defaults to 11b-preview
+        help="If one model fails (Error 400), try selecting a different one from this list."
     )
     
     # EXPORT
@@ -220,9 +226,9 @@ def stream_ai_answer(messages, search_results, doc_text, df, image_data, vision_
         context_text += f"\n\nDATAFRAME PREVIEW:\n{df.head().to_markdown()}"
         context_text += "\n\nINSTRUCTIONS: If asked to visualize/plot, write Python code wrapped in ```python ... ```."
 
-    # --- USE THE MODEL NAME FROM SETTINGS ---
+    # --- USE THE MODEL SELECTED IN SIDEBAR ---
     if image_data:
-        model = vision_model_name # <--- Uses the text box value
+        model = vision_model_name 
         system_content = f"You are a helpful AI Assistant. Analyze the image provided. Use this context if available: {context_text}"
         
         user_content = [
