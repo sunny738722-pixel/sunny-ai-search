@@ -96,20 +96,16 @@ with st.sidebar:
     
     # SETTINGS
     st.markdown("### ⚙️ Settings")
+    # --- NEW: DEEPSEEK TOGGLE ---
+    use_deepseek = st.toggle("🧠 DeepSeek R1 (Thinking)", value=False, help="Use for Math, Logic, and Coding tasks.")
+    
     deep_mode = st.toggle("🚀 Deep Research", value=False)
     enable_voice = st.toggle("🔊 Hear AI Response", value=False)
     
-    # --- UPDATED: DROPDOWN SELECTOR ---
-    # We use a selectbox so you can easily swap models if one dies
     vision_model_name = st.selectbox(
-        "Select Vision Model:", 
-        [
-            "llama-3.2-11b-vision-preview",
-            "llama-3.2-90b-vision-preview",
-            "llama-3.2-11b-vision" 
-        ],
-        index=0, # Defaults to 11b-preview
-        help="If one model fails (Error 400), try selecting a different one from this list."
+        "Vision Model:", 
+        ["llama-3.2-11b-vision-preview", "llama-3.2-90b-vision-preview"],
+        index=0
     )
     
     # EXPORT
@@ -216,7 +212,7 @@ def generate_image(prompt):
         clean_prompt = prompt.replace(" ", "%20")
         return f"https://image.pollinations.ai/prompt/{clean_prompt}"
 
-def stream_ai_answer(messages, search_results, doc_text, df, image_data, vision_model_name):
+def stream_ai_answer(messages, search_results, doc_text, df, image_data, vision_model_name, use_deepseek):
     context_text = ""
     if search_results:
         context_text += "\nWEB SOURCES:\n" + "\n".join([f"- {r['title']}: {r['content']}" for r in search_results])
@@ -226,23 +222,26 @@ def stream_ai_answer(messages, search_results, doc_text, df, image_data, vision_
         context_text += f"\n\nDATAFRAME PREVIEW:\n{df.head().to_markdown()}"
         context_text += "\n\nINSTRUCTIONS: If asked to visualize/plot, write Python code wrapped in ```python ... ```."
 
-    # --- USE THE MODEL SELECTED IN SIDEBAR ---
+    # --- BRAIN SELECTION LOGIC ---
     if image_data:
         model = vision_model_name 
         system_content = f"You are a helpful AI Assistant. Analyze the image provided. Use this context if available: {context_text}"
-        
         user_content = [
             {"type": "text", "text": messages[-1]["content"]},
             {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_data}"}}
         ]
-        
-        final_messages = [
-            {"role": "system", "content": system_content},
-            {"role": "user", "content": user_content}
-        ]
+        final_messages = [{"role": "system", "content": system_content}, {"role": "user", "content": user_content}]
+    
+    elif use_deepseek:
+        # DEEPSEEK MODE (Thinking)
+        model = "deepseek-r1-distill-llama-70b"
+        # DeepSeek often prefers simple prompts as it does its own reasoning
+        final_messages = [{"role": "system", "content": "You are a reasoning AI. Think step-by-step."}] + [{"role": m["role"], "content": m["content"]} for m in messages]
+        # Append context to the last user message to ensure it sees it
+        final_messages[-1]["content"] += f"\n\nCONTEXT:\n{context_text}"
     
     else:
-        # Standard Text Model
+        # STANDARD LLAMA MODE
         model = "llama-3.3-70b-versatile"
         system_content = f"You are a helpful AI Assistant. Use context to answer. {context_text}"
         final_messages = [{"role": "system", "content": system_content}] + [{"role": m["role"], "content": m["content"]} for m in messages]
@@ -251,7 +250,7 @@ def stream_ai_answer(messages, search_results, doc_text, df, image_data, vision_
         stream = groq_client.chat.completions.create(
             model=model,
             messages=final_messages,
-            temperature=0.5,
+            temperature=0.6,
             stream=True,
         )
         for chunk in stream:
@@ -268,7 +267,20 @@ st.title(f"{active_chat['title']}")
 # Display History
 for i, message in enumerate(active_chat["messages"]):
     with st.chat_message(message["role"]):
-        st.markdown(message["content"])
+        # DeepSeek Parsing: Check if message has <think> tags
+        content = message["content"]
+        if "<think>" in content and "</think>" in content:
+            # Extract thought
+            parts = re.split(r'</?think>', content)
+            thought_process = parts[1].strip()
+            final_answer = parts[2].strip()
+            
+            # Show Thinking Box
+            with st.expander("💭 Thinking Process"):
+                st.markdown(thought_process)
+            st.markdown(final_answer)
+        else:
+            st.markdown(content)
         
         if "code_ran" in message and active_chat["dataframe"] is not None:
             with st.expander("📊 Analysis Output"):
@@ -282,7 +294,7 @@ for i, message in enumerate(active_chat["messages"]):
 
 # Input
 audio_value = st.audio_input("🎙️")
-prompt = st.chat_input("Ask anything, upload image/pdf, or say 'Generate image of...'")
+prompt = st.chat_input("Ask anything...")
 final_prompt = None
 
 if audio_value:
@@ -320,16 +332,38 @@ if final_prompt:
                     st.image(image_result, caption=final_prompt)
                     active_chat["messages"].append({"role": "assistant", "content": f"Here is your image: {final_prompt}", "image_url": image_result})
         
-        # --- STANDARD / VISION PATH ---
+        # --- STANDARD / DEEPSEEK PATH ---
         else:
             search_results = []
             if (intent == "SEARCH" or deep_mode) and not df and not active_chat["doc_text"] and not img_data:
                 with st.spinner("Searching..."):
                     search_results = search_web(final_prompt, deep_mode)
             
-            full_response = st.write_stream(
-                stream_ai_answer(active_chat["messages"], search_results, active_chat["doc_text"], df, img_data, vision_model_name)
-            )
+            # We capture the full stream to parse the <think> tags later
+            full_response = ""
+            placeholder = st.empty()
+            
+            # Stream generator
+            stream = stream_ai_answer(active_chat["messages"], search_results, active_chat["doc_text"], df, img_data, vision_model_name, use_deepseek)
+            
+            for chunk in stream:
+                full_response += chunk
+                # If DeepSeek is thinking, we can optionally show it raw or just wait
+                # For simplicity, we stream the raw text and then format it beautifully after completion
+                placeholder.markdown(full_response + "▌")
+            
+            # Post-processing: If DeepSeek, separate the thought
+            if "<think>" in full_response and "</think>" in full_response:
+                placeholder.empty() # Clear raw stream
+                parts = re.split(r'</?think>', full_response)
+                thought = parts[1].strip()
+                answer = parts[2].strip() if len(parts) > 2 else ""
+                
+                with st.expander("💭 Thinking Process"):
+                    st.markdown(thought)
+                st.markdown(answer)
+            else:
+                placeholder.markdown(full_response)
             
             # Code Execution
             code_block = None
@@ -341,11 +375,15 @@ if final_prompt:
                     result = execute_python_code(code_block, df)
                     if "Error" in result: st.error(result)
             
-            # Voice Generation
+            # Voice Generation (Only read the answer, not the thought)
             audio_file = None
             if enable_voice:
+                text_to_speak = full_response
+                if "<think>" in full_response:
+                     text_to_speak = full_response.split("</think>")[-1] # Only read what comes after thinking
+                
                 with st.spinner("Generating audio..."):
-                    audio_file = generate_audio(full_response)
+                    audio_file = generate_audio(text_to_speak)
                     if audio_file:
                         st.audio(audio_file, format="audio/mp3")
 
