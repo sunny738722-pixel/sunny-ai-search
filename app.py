@@ -1,8 +1,8 @@
 import streamlit as st
+import google.generativeai as genai
 from groq import Groq
 from tavily import TavilyClient
 import uuid
-import json
 import PyPDF2
 from fpdf import FPDF
 import pandas as pd
@@ -12,6 +12,8 @@ import tempfile
 import os
 import requests
 import base64
+from PIL import Image
+import io
 
 # ------------------------------------------------------------------
 # 1. PAGE CONFIGURATION
@@ -53,6 +55,7 @@ active_chat = st.session_state.all_chats[active_id]
 # ------------------------------------------------------------------
 with st.sidebar:
     st.title("🧠 Research Center")
+    st.caption("Powered by Google Gemini 1.5")
     
     # A. DATA ANALYST
     st.markdown("### 📊 Data Analyst")
@@ -83,51 +86,23 @@ with st.sidebar:
         except Exception as e:
             st.error(f"Error reading PDF: {e}")
 
-    # C. VISION EYE
+    # C. VISION EYE (Gemini Native)
     st.markdown("### 👁️ Vision Eye")
     uploaded_img = st.file_uploader("Upload Image:", type=["jpg", "jpeg", "png"])
     if uploaded_img:
-        bytes_data = uploaded_img.getvalue()
-        base64_image = base64.b64encode(bytes_data).decode('utf-8')
-        st.session_state.all_chats[active_id]["image_data"] = base64_image
+        # Save image object to session state for Gemini
+        image = Image.open(uploaded_img)
+        st.session_state.all_chats[active_id]["image_data"] = image
         st.success(f"✅ Loaded Image: {uploaded_img.name}")
         st.image(uploaded_img, caption="Context Active", use_container_width=True)
 
     st.divider()
     
-    # --- MASTER SETTINGS ---
+    # SETTINGS
     st.markdown("### ⚙️ Intelligence Settings")
-    
-    use_deepseek = st.toggle("🧠 DeepSeek R1 (Thinking Mode)", value=False)
     deep_mode = st.toggle("🚀 Deep Research (Web)", value=False)
     enable_voice = st.toggle("🔊 Hear AI Response", value=False)
     
-    # MASTER MODEL CONTROL PANEL
-    with st.expander("🔧 Fix Model Errors (Advanced)", expanded=False):
-        st.caption("If you get Error 400 (Decommissioned), switch models here.")
-        
-        # 1. VISION MODEL SELECTOR
-        vision_choice = st.selectbox(
-            "👁️ Vision Model:", 
-            ["llama-3.2-11b-vision-preview", "llama-3.2-90b-vision-preview", "Custom..."],
-            index=0
-        )
-        if vision_choice == "Custom...":
-            vision_model_name = st.text_input("Enter Vision Model Name:", value="llama-3.2-11b-vision-preview")
-        else:
-            vision_model_name = vision_choice
-            
-        # 2. DEEPSEEK MODEL SELECTOR
-        deepseek_choice = st.selectbox(
-            "🧠 DeepSeek Model:", 
-            ["deepseek-r1-distill-qwen-32b", "deepseek-r1-distill-llama-70b", "Custom..."],
-            index=0 # Default to 32b since 70b is dying
-        )
-        if deepseek_choice == "Custom...":
-            deepseek_model_name = st.text_input("Enter DeepSeek Model Name:", value="deepseek-r1-distill-qwen-32b")
-        else:
-            deepseek_model_name = deepseek_choice
-
     # EXPORT
     if st.button("📥 Download Chat PDF"):
         if active_chat["messages"]:
@@ -164,11 +139,17 @@ with st.sidebar:
 # 4. API KEYS
 # ------------------------------------------------------------------
 try:
+    # Google Gemini Config
+    genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+    
+    # Keep Groq ONLY for Audio Transcription (Whisper is stable)
     groq_client = Groq(api_key=st.secrets["GROQ_API_KEY"])
+    
+    # Search & Image Tools
     tavily_client = TavilyClient(api_key=st.secrets["TAVILY_API_KEY"])
     HF_TOKEN = st.secrets["HF_TOKEN"]
 except Exception:
-    st.error("🚨 API Keys missing! Check Streamlit Settings.")
+    st.error("🚨 API Keys missing! Check Streamlit Settings (Need GEMINI_API_KEY).")
     st.stop()
 
 # ------------------------------------------------------------------
@@ -187,10 +168,12 @@ def classify_intent(user_query, has_data=False):
     if has_data:
         if any(w in uq_lower for w in ["plot", "chart", "graph"]): return "PLOT"
         if any(w in uq_lower for w in ["analyze", "summary"]): return "ANALYZE"
-    system_prompt = "Classify intent: 'SEARCH' (facts/news), 'CHAT' (casual). Return ONLY word."
+    
+    # Use Gemini to classify quickly
     try:
-        resp = groq_client.chat.completions.create(model="llama-3.1-8b-instant", messages=[{"role":"system","content":system_prompt},{"role":"user","content":user_query}], max_tokens=10)
-        return resp.choices[0].message.content.strip().upper()
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        response = model.generate_content(f"Classify intent of this query: '{user_query}'. Return ONLY one word: 'SEARCH' (if it needs recent news/facts) or 'CHAT' (if casual/logic).")
+        return response.text.strip().upper()
     except: return "SEARCH"
 
 def search_web(query, is_deep_mode):
@@ -220,6 +203,7 @@ def generate_audio(text):
     except: return None
 
 def generate_image(prompt):
+    # Pro Mode (Hugging Face)
     API_URL = "https://router.huggingface.co/hf-inference/models/stabilityai/stable-diffusion-xl-base-1.0"
     headers = {"Authorization": f"Bearer {HF_TOKEN}"}
     try:
@@ -232,7 +216,8 @@ def generate_image(prompt):
         clean_prompt = prompt.replace(" ", "%20")
         return f"https://image.pollinations.ai/prompt/{clean_prompt}"
 
-def stream_ai_answer(messages, search_results, doc_text, df, image_data, vision_model_name, use_deepseek, deepseek_model_name):
+def stream_gemini_answer(messages, search_results, doc_text, df, image_data):
+    # 1. Build Context
     context_text = ""
     if search_results:
         context_text += "\nWEB SOURCES:\n" + "\n".join([f"- {r['title']}: {r['content']}" for r in search_results])
@@ -242,42 +227,37 @@ def stream_ai_answer(messages, search_results, doc_text, df, image_data, vision_
         context_text += f"\n\nDATAFRAME PREVIEW:\n{df.head().to_markdown()}"
         context_text += "\n\nINSTRUCTIONS: If asked to visualize/plot, write Python code wrapped in ```python ... ```."
 
-    # --- BRAIN SELECTION LOGIC ---
+    # 2. Build Message List for Gemini
+    # Gemini handles history slightly differently, but we can just prompt it with the full context
+    system_prompt = f"You are a helpful AI Assistant. Use this context to answer: {context_text}"
+    
+    # Combine everything into a prompt list
+    # If image exists, Gemini accepts [prompt, image]
+    prompt_content = [system_prompt]
+    
+    # Add chat history (simplified for Gemini)
+    for msg in messages:
+        prompt_content.append(f"{msg['role'].upper()}: {msg['content']}")
+    
+    # Add the Image if present (Visual Mode)
     if image_data:
-        # VISION MODE
-        model = vision_model_name 
-        system_content = f"You are a helpful AI Assistant. Analyze the image provided. Use this context if available: {context_text}"
-        user_content = [
-            {"type": "text", "text": messages[-1]["content"]},
-            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_data}"}}
-        ]
-        final_messages = [{"role": "system", "content": system_content}, {"role": "user", "content": user_content}]
+        prompt_content.append("User uploaded an image:")
+        prompt_content.append(image_data) # Actual PIL Image object
     
-    elif use_deepseek:
-        # DEEPSEEK MODE
-        model = deepseek_model_name
-        final_messages = [{"role": "system", "content": "You are a reasoning AI. Think step-by-step."}] + [{"role": m["role"], "content": m["content"]} for m in messages]
-        final_messages[-1]["content"] += f"\n\nCONTEXT:\n{context_text}"
-    
-    else:
-        # STANDARD LLAMA MODE
-        model = "llama-3.3-70b-versatile"
-        system_content = f"You are a helpful AI Assistant. Use context to answer. {context_text}"
-        final_messages = [{"role": "system", "content": system_content}] + [{"role": m["role"], "content": m["content"]} for m in messages]
+    prompt_content.append("ASSISTANT:") # Trigger response
 
     try:
-        stream = groq_client.chat.completions.create(
-            model=model,
-            messages=final_messages,
-            temperature=0.6,
-            stream=True,
-            max_tokens=6000 # Stop infinite thinking
-        )
-        for chunk in stream:
-            if chunk.choices[0].delta.content:
-                yield chunk.choices[0].delta.content
+        # Initialize Gemini 1.5 Flash (The fast, multimodal one)
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        
+        # Stream response
+        response = model.generate_content(prompt_content, stream=True)
+        
+        for chunk in response:
+            if chunk.text:
+                yield chunk.text
     except Exception as e:
-        yield f"❌ Error: {e}"
+        yield f"❌ Gemini Error: {e}"
 
 # ------------------------------------------------------------------
 # 6. MAIN UI
@@ -287,20 +267,7 @@ st.title(f"{active_chat['title']}")
 # Display History
 for i, message in enumerate(active_chat["messages"]):
     with st.chat_message(message["role"]):
-        content = message["content"]
-        # DeepSeek Parsing
-        if "<think>" in content and "</think>" in content:
-            try:
-                parts = re.split(r'</?think>', content)
-                thought = parts[1].strip()
-                answer = parts[2].strip()
-                with st.expander("💭 Thinking Process"):
-                    st.markdown(thought)
-                st.markdown(answer)
-            except:
-                st.markdown(content)
-        else:
-            st.markdown(content)
+        st.markdown(message["content"])
         
         if "code_ran" in message and active_chat["dataframe"] is not None:
             with st.expander("📊 Analysis Output"):
@@ -314,7 +281,7 @@ for i, message in enumerate(active_chat["messages"]):
 
 # Input
 audio_value = st.audio_input("🎙️")
-prompt = st.chat_input("Ask anything...")
+prompt = st.chat_input("Ask anything, upload image/pdf, or say 'Generate image of...'")
 final_prompt = None
 
 if audio_value:
@@ -352,36 +319,16 @@ if final_prompt:
                     st.image(image_result, caption=final_prompt)
                     active_chat["messages"].append({"role": "assistant", "content": f"Here is your image: {final_prompt}", "image_url": image_result})
         
-        # --- STANDARD / DEEPSEEK / VISION PATH ---
+        # --- GEMINI PATH (Chat + Vision + Data) ---
         else:
             search_results = []
             if (intent == "SEARCH" or deep_mode) and not df and not active_chat["doc_text"] and not img_data:
                 with st.spinner("Searching..."):
                     search_results = search_web(final_prompt, deep_mode)
             
-            full_response = ""
-            placeholder = st.empty()
-            
-            stream = stream_ai_answer(active_chat["messages"], search_results, active_chat["doc_text"], df, img_data, vision_model_name, use_deepseek, deepseek_model_name)
-            
-            for chunk in stream:
-                full_response += chunk
-                placeholder.markdown(full_response + "▌")
-            
-            # Post-Processing
-            if "<think>" in full_response and "</think>" in full_response:
-                placeholder.empty()
-                try:
-                    parts = re.split(r'</?think>', full_response)
-                    thought = parts[1].strip()
-                    answer = parts[2].strip() if len(parts) > 2 else ""
-                    with st.expander("💭 Thinking Process"):
-                        st.markdown(thought)
-                    st.markdown(answer)
-                except:
-                     placeholder.markdown(full_response)
-            else:
-                placeholder.markdown(full_response)
+            full_response = st.write_stream(
+                stream_gemini_answer(active_chat["messages"], search_results, active_chat["doc_text"], df, img_data)
+            )
             
             # Code Execution
             code_block = None
@@ -393,14 +340,11 @@ if final_prompt:
                     result = execute_python_code(code_block, df)
                     if "Error" in result: st.error(result)
             
-            # Voice
+            # Voice Generation
             audio_file = None
             if enable_voice:
-                text_to_speak = full_response
-                if "<think>" in full_response:
-                     text_to_speak = full_response.split("</think>")[-1]
                 with st.spinner("Generating audio..."):
-                    audio_file = generate_audio(text_to_speak)
+                    audio_file = generate_audio(full_response)
                     if audio_file:
                         st.audio(audio_file, format="audio/mp3")
 
