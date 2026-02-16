@@ -11,9 +11,7 @@ from gtts import gTTS
 import tempfile
 import os
 import requests
-import base64
 from PIL import Image
-import io
 
 # ------------------------------------------------------------------
 # 1. PAGE CONFIGURATION
@@ -45,7 +43,6 @@ if "active_chat_id" not in st.session_state:
     st.session_state.active_chat_id = new_id
 
 active_id = st.session_state.active_chat_id
-# Safety Check
 if active_id not in st.session_state.all_chats:
     st.session_state.all_chats[active_id] = {"title": "New Chat", "messages": [], "doc_text": "", "dataframe": None, "image_data": None}
 active_chat = st.session_state.all_chats[active_id]
@@ -55,7 +52,7 @@ active_chat = st.session_state.all_chats[active_id]
 # ------------------------------------------------------------------
 with st.sidebar:
     st.title("🧠 Research Center")
-    st.caption("Powered by Google Gemini 1.5")
+    st.caption("Powered by Google Gemini")
     
     # A. DATA ANALYST
     st.markdown("### 📊 Data Analyst")
@@ -86,11 +83,10 @@ with st.sidebar:
         except Exception as e:
             st.error(f"Error reading PDF: {e}")
 
-    # C. VISION EYE (Gemini Native)
+    # C. VISION EYE
     st.markdown("### 👁️ Vision Eye")
     uploaded_img = st.file_uploader("Upload Image:", type=["jpg", "jpeg", "png"])
     if uploaded_img:
-        # Save image object to session state for Gemini
         image = Image.open(uploaded_img)
         st.session_state.all_chats[active_id]["image_data"] = image
         st.success(f"✅ Loaded Image: {uploaded_img.name}")
@@ -102,6 +98,22 @@ with st.sidebar:
     st.markdown("### ⚙️ Intelligence Settings")
     deep_mode = st.toggle("🚀 Deep Research (Web)", value=False)
     enable_voice = st.toggle("🔊 Hear AI Response", value=False)
+    
+    # MASTER MODEL SWITCH
+    # If one model fails (404 Not Found), try the next one in the list.
+    gemini_model_name = st.selectbox(
+        "Select Gemini Model:", 
+        [
+            "gemini-1.5-flash",        # Standard (Fast)
+            "gemini-1.5-flash-001",    # Version Pinned (More Stable)
+            "gemini-1.5-flash-002",    # Newer Version
+            "gemini-2.0-flash-exp",    # Experimental (Smartest)
+            "gemini-1.5-pro",          # Heavy Duty
+            "gemini-pro"               # Legacy (Old but Global)
+        ],
+        index=0,
+        help="If you get Error 404, switch to a different model here."
+    )
     
     # EXPORT
     if st.button("📥 Download Chat PDF"):
@@ -139,17 +151,12 @@ with st.sidebar:
 # 4. API KEYS
 # ------------------------------------------------------------------
 try:
-    # Google Gemini Config
     genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-    
-    # Keep Groq ONLY for Audio Transcription (Whisper is stable)
     groq_client = Groq(api_key=st.secrets["GROQ_API_KEY"])
-    
-    # Search & Image Tools
     tavily_client = TavilyClient(api_key=st.secrets["TAVILY_API_KEY"])
     HF_TOKEN = st.secrets["HF_TOKEN"]
 except Exception:
-    st.error("🚨 API Keys missing! Check Streamlit Settings (Need GEMINI_API_KEY).")
+    st.error("🚨 API Keys missing! Check Streamlit Settings.")
     st.stop()
 
 # ------------------------------------------------------------------
@@ -168,13 +175,7 @@ def classify_intent(user_query, has_data=False):
     if has_data:
         if any(w in uq_lower for w in ["plot", "chart", "graph"]): return "PLOT"
         if any(w in uq_lower for w in ["analyze", "summary"]): return "ANALYZE"
-    
-    # Use Gemini to classify quickly
-    try:
-        model = genai.GenerativeModel('gemini-1.5-flash')
-        response = model.generate_content(f"Classify intent of this query: '{user_query}'. Return ONLY one word: 'SEARCH' (if it needs recent news/facts) or 'CHAT' (if casual/logic).")
-        return response.text.strip().upper()
-    except: return "SEARCH"
+    return "CHAT" # Simplified for Gemini
 
 def search_web(query, is_deep_mode):
     if is_deep_mode: return tavily_client.search(query, max_results=5).get("results", [])
@@ -203,7 +204,6 @@ def generate_audio(text):
     except: return None
 
 def generate_image(prompt):
-    # Pro Mode (Hugging Face)
     API_URL = "https://router.huggingface.co/hf-inference/models/stabilityai/stable-diffusion-xl-base-1.0"
     headers = {"Authorization": f"Bearer {HF_TOKEN}"}
     try:
@@ -216,8 +216,8 @@ def generate_image(prompt):
         clean_prompt = prompt.replace(" ", "%20")
         return f"https://image.pollinations.ai/prompt/{clean_prompt}"
 
-def stream_gemini_answer(messages, search_results, doc_text, df, image_data):
-    # 1. Build Context
+def stream_gemini_answer(messages, search_results, doc_text, df, image_data, model_name):
+    # 1. Context
     context_text = ""
     if search_results:
         context_text += "\nWEB SOURCES:\n" + "\n".join([f"- {r['title']}: {r['content']}" for r in search_results])
@@ -227,32 +227,23 @@ def stream_gemini_answer(messages, search_results, doc_text, df, image_data):
         context_text += f"\n\nDATAFRAME PREVIEW:\n{df.head().to_markdown()}"
         context_text += "\n\nINSTRUCTIONS: If asked to visualize/plot, write Python code wrapped in ```python ... ```."
 
-    # 2. Build Message List for Gemini
-    # Gemini handles history slightly differently, but we can just prompt it with the full context
+    # 2. Prompt Construction
     system_prompt = f"You are a helpful AI Assistant. Use this context to answer: {context_text}"
-    
-    # Combine everything into a prompt list
-    # If image exists, Gemini accepts [prompt, image]
     prompt_content = [system_prompt]
     
-    # Add chat history (simplified for Gemini)
     for msg in messages:
         prompt_content.append(f"{msg['role'].upper()}: {msg['content']}")
     
-    # Add the Image if present (Visual Mode)
     if image_data:
         prompt_content.append("User uploaded an image:")
-        prompt_content.append(image_data) # Actual PIL Image object
+        prompt_content.append(image_data)
     
-    prompt_content.append("ASSISTANT:") # Trigger response
+    prompt_content.append("ASSISTANT:") 
 
     try:
-        # Initialize Gemini 1.5 Flash (The fast, multimodal one)
-        model = genai.GenerativeModel('gemini-1.5-flash')
-        
-        # Stream response
+        # 3. Initialize Model with Selected Name
+        model = genai.GenerativeModel(model_name)
         response = model.generate_content(prompt_content, stream=True)
-        
         for chunk in response:
             if chunk.text:
                 yield chunk.text
@@ -268,7 +259,6 @@ st.title(f"{active_chat['title']}")
 for i, message in enumerate(active_chat["messages"]):
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
-        
         if "code_ran" in message and active_chat["dataframe"] is not None:
             with st.expander("📊 Analysis Output"):
                 execute_python_code(message["code_ran"], active_chat["dataframe"])
@@ -281,7 +271,7 @@ for i, message in enumerate(active_chat["messages"]):
 
 # Input
 audio_value = st.audio_input("🎙️")
-prompt = st.chat_input("Ask anything, upload image/pdf, or say 'Generate image of...'")
+prompt = st.chat_input("Ask anything...")
 final_prompt = None
 
 if audio_value:
@@ -308,7 +298,6 @@ if final_prompt:
         img_data = active_chat.get("image_data")
         intent = classify_intent(final_prompt, has_data=(df is not None))
         
-        # --- IMAGE GENERATION ---
         if intent == "IMAGE":
             with st.spinner("🎨 Painting..."):
                 image_result = generate_image(final_prompt)
@@ -318,19 +307,17 @@ if final_prompt:
                 else:
                     st.image(image_result, caption=final_prompt)
                     active_chat["messages"].append({"role": "assistant", "content": f"Here is your image: {final_prompt}", "image_url": image_result})
-        
-        # --- GEMINI PATH (Chat + Vision + Data) ---
         else:
             search_results = []
             if (intent == "SEARCH" or deep_mode) and not df and not active_chat["doc_text"] and not img_data:
                 with st.spinner("Searching..."):
                     search_results = search_web(final_prompt, deep_mode)
             
+            # Pass the selected model name to the function
             full_response = st.write_stream(
-                stream_gemini_answer(active_chat["messages"], search_results, active_chat["doc_text"], df, img_data)
+                stream_gemini_answer(active_chat["messages"], search_results, active_chat["doc_text"], df, img_data, gemini_model_name)
             )
             
-            # Code Execution
             code_block = None
             if df is not None:
                 match = re.search(r"```python(.*?)```", full_response, re.DOTALL)
@@ -340,7 +327,6 @@ if final_prompt:
                     result = execute_python_code(code_block, df)
                     if "Error" in result: st.error(result)
             
-            # Voice Generation
             audio_file = None
             if enable_voice:
                 with st.spinner("Generating audio..."):
