@@ -13,6 +13,7 @@ import os
 import requests
 from PIL import Image
 import io
+import base64
 
 # ------------------------------------------------------------------
 # 1. PAGE CONFIGURATION
@@ -53,7 +54,7 @@ active_chat = st.session_state.all_chats[active_id]
 # ------------------------------------------------------------------
 with st.sidebar:
     st.title("🧠 Research Center")
-    st.caption("Hybrid Engine: Gemini + Llama")
+    st.caption("System Status: 🟢 Hybrid Online")
     
     # A. DATA ANALYST
     st.markdown("### 📊 Data Analyst")
@@ -100,6 +101,10 @@ with st.sidebar:
     deep_mode = st.toggle("🚀 Deep Research (Web)", value=False)
     enable_voice = st.toggle("🔊 Hear AI Response", value=False)
     
+    with st.expander("🔧 Advanced Config"):
+        st.info("If vision fails, change the backup model below.")
+        groq_vision_model = st.text_input("Backup Vision Model:", value="llama-3.2-11b-vision-preview")
+
     # EXPORT
     if st.button("📥 Download Chat PDF"):
         if active_chat["messages"]:
@@ -133,7 +138,7 @@ with st.sidebar:
             st.rerun()
 
 # ------------------------------------------------------------------
-# 4. API KEYS (ROBUST LOADING)
+# 4. API KEYS
 # ------------------------------------------------------------------
 try:
     if "GEMINI_API_KEY" in st.secrets:
@@ -206,10 +211,10 @@ def generate_image(prompt):
         clean_prompt = prompt.replace(" ", "%20")
         return f"https://image.pollinations.ai/prompt/{clean_prompt}"
 
-# --- THE CASCADE ENGINE (FALLBACK SYSTEM) ---
-def get_ai_response_stream(messages, search_results, doc_text, df, image_data):
+# --- THE SILENT CASCADE ENGINE ---
+def get_ai_response_stream(messages, search_results, doc_text, df, image_data, groq_vision_model):
     
-    # 1. Build Context String
+    # Context
     context_text = ""
     if search_results:
         context_text += "\nWEB SOURCES:\n" + "\n".join([f"- {r['title']}: {r['content']}" for r in search_results])
@@ -219,7 +224,7 @@ def get_ai_response_stream(messages, search_results, doc_text, df, image_data):
         context_text += f"\n\nDATAFRAME PREVIEW:\n{df.head().to_markdown()}"
         context_text += "\n\nINSTRUCTIONS: If asked to visualize/plot, write Python code wrapped in ```python ... ```."
 
-    # --- ATTEMPT 1: GOOGLE GEMINI 2.0 (The Smartest) ---
+    # --- ATTEMPT 1: GOOGLE GEMINI ---
     try:
         system_prompt = f"You are a helpful AI Assistant. Use this context to answer: {context_text}"
         prompt_content = [system_prompt]
@@ -232,43 +237,57 @@ def get_ai_response_stream(messages, search_results, doc_text, df, image_data):
         
         prompt_content.append("ASSISTANT:") 
 
-        # Try the experimental flash model first (it's new and robust)
-        model = genai.GenerativeModel('gemini-2.0-flash-exp')
+        # Try Gemini 1.5 Flash first
+        model = genai.GenerativeModel('gemini-1.5-flash')
         response = model.generate_content(prompt_content, stream=True)
         for chunk in response:
             if chunk.text: yield chunk.text
             
-    except Exception as e_google:
-        # --- ATTEMPT 2: GOOGLE GEMINI 1.5 (The Backup) ---
+    except Exception:
+        # --- ATTEMPT 2: SILENT FALLBACK TO GROQ ---
+        # No error message displayed to user, just switches.
         try:
-            model = genai.GenerativeModel('gemini-1.5-flash')
-            response = model.generate_content(prompt_content, stream=True)
-            for chunk in response:
-                if chunk.text: yield chunk.text
+            # Prepare Groq Messages
+            groq_messages = [{"role": "system", "content": f"You are a helpful AI. {context_text}"}] 
+            
+            # Add History
+            for m in messages:
+                groq_messages.append({"role": m["role"], "content": m["content"]})
+
+            # Check if we need VISION or TEXT
+            if image_data:
+                # VISION FALLBACK (Llama 3.2 Vision on Groq)
+                # Convert PIL image to base64
+                buffered = io.BytesIO()
+                image_data.save(buffered, format="JPEG")
+                img_str = base64.b64encode(buffered.getvalue()).decode()
                 
-        except Exception as e_google_backup:
-            # --- ATTEMPT 3: GROQ (The Fallback) ---
-            # If Google fails (Region lock/API error), switch to Llama 3 on Groq
-            try:
-                yield "⚠️ *Gemini failed, switching to Llama 3...*\n\n"
+                # Vision Payload
+                user_content = [
+                    {"type": "text", "text": messages[-1]["content"]},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_str}"}}
+                ]
+                groq_messages[-1]["content"] = user_content # Replace last text msg with multimodal msg
                 
-                # Convert Image to Base64 for Groq if needed
-                groq_messages = [{"role": "system", "content": system_prompt}] + [{"role": m["role"], "content": m["content"]} for m in messages]
-                
-                # Note: This Groq fallback is TEXT ONLY for stability unless we do complex base64 conversion
-                # We will stick to text fallback to ensure at least a reply
-                
+                stream = groq_client.chat.completions.create(
+                    model=groq_vision_model, # Uses the backup model name from settings
+                    messages=groq_messages,
+                    stream=True
+                )
+            else:
+                # TEXT FALLBACK (Llama 3.3)
                 stream = groq_client.chat.completions.create(
                     model="llama-3.3-70b-versatile",
                     messages=groq_messages,
                     stream=True
                 )
-                for chunk in stream:
-                    if chunk.choices[0].delta.content:
-                        yield chunk.choices[0].delta.content
+            
+            for chunk in stream:
+                if chunk.choices[0].delta.content:
+                    yield chunk.choices[0].delta.content
                         
-            except Exception as e_groq:
-                 yield f"❌ TOTAL FAILURE. Google Error: {e_google}. Groq Error: {e_groq}"
+        except Exception as e_groq:
+             yield f"❌ System Error: Both engines failed. Please refresh. (Details: {e_groq})"
 
 # ------------------------------------------------------------------
 # 6. MAIN UI
@@ -301,8 +320,6 @@ if prompt:
     final_prompt = prompt
 
 if final_prompt:
-    # Removed the "Double Submission Check" that was blocking repeated inputs
-    
     with st.chat_message("user"):
         st.markdown(final_prompt)
     active_chat["messages"].append({"role": "user", "content": final_prompt})
@@ -314,6 +331,11 @@ if final_prompt:
         df = active_chat["dataframe"]
         img_data = active_chat.get("image_data")
         intent = classify_intent(final_prompt, has_data=(df is not None))
+        
+        # Pull the backup vision model name from the expander input (default is 11b)
+        # Note: We can't access sidebar widget value easily here unless we put it in session state or simple var
+        # For simplicity, we hardcode the most stable one or rely on the user input if we move it up.
+        # Let's rely on the variable 'groq_vision_model' defined in sidebar.
         
         if intent == "IMAGE":
             with st.spinner("🎨 Painting..."):
@@ -330,9 +352,9 @@ if final_prompt:
                 with st.spinner("Searching..."):
                     search_results = search_web(final_prompt, deep_mode)
             
-            # CALL THE CASCADE ENGINE
+            # CALL SILENT CASCADE
             full_response = st.write_stream(
-                get_ai_response_stream(active_chat["messages"], search_results, active_chat["doc_text"], df, img_data)
+                get_ai_response_stream(active_chat["messages"], search_results, active_chat["doc_text"], df, img_data, groq_vision_model)
             )
             
             code_block = None
